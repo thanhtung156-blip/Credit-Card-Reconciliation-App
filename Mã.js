@@ -1,26 +1,11 @@
 /**
- * Corporate Card Expense Reconciliation System v1.0
+ * Corporate Card Expense Reconciliation System v3.0
  * 
- * This project has been modularized and organized into folders:
+ * Project files have been consolidated for simplicity:
  * 
- * [01_Core]
- * - Constants.js: All constants and configuration settings.
- * - Utils.js: Shared utility functions for dates, amounts, and logging.
- * - Config.js: Logic for reading the Config sheet.
- * 
- * [02_Sheets]
- * - SheetOps.js: Spreadsheet structure and formatting.
- * 
- * [03_Services]
- * - Matching.js: Core AI matching and OCR logic.
- * - DriveOps.js: Google Drive and Service Account management.
- * - Import.js: Legacy bank statement import logic (disabled in UI).
- * 
- * [04_UI]
- * - UI.js: Menu creation and dialog/sidebar management.
- * 
- * [05_Testing]
- * - Tests.js: Unit and diagnostic tests.
- * 
- * Please edit the specific module file in its respective folder for changes.
+ * - Core.js: Configuration, constants, and shared utilities.
+ * - Services.js: Matching logic, Drive operations, and Sheet formatting.
+ * - Interface.js & UploadDialog.html: User interface and menu.
+ * - Tests.js: Diagnostic tests.
+ * - Mã.js: Entry point.
  */

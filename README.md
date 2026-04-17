@@ -12,12 +12,13 @@ Hệ thống giúp tự động hóa quy trình đối soát hóa đơn (receipt
 - **OCR:** Google Cloud Vision API
 - **AI Engine:** Google Gemini AI (1.5 Flash / 2.0 Flash)
 
-## 📁 Cấu trúc thư mục (Modular)
-- `01_Core/`: Chứa các hằng số, tiện ích và logic đọc cấu hình.
-- `02_Sheets/`: Các thao tác với Spreadsheet (formatting, tạo sheet).
-- `03_Services/`: Logic nghiệp vụ chính (Matching, OCR, Drive Operations).
-- `04_UI/`: Quản lý Menu, Sidebar và Dialog.
-- `05_Testing/`: Các bộ test case để kiểm tra hệ thống.
+## 📁 Cấu trúc tệp tin
+Mã nguồn đã được gộp lại thành các module chính để dễ quản lý trên Google Apps Script:
+- `Core.js`: Chứa cấu hình, hằng số và các hàm tiện ích dùng chung.
+- `Services.js`: Chứa toàn bộ logic nghiệp vụ (Matching AI, Drive Ops, Sheet Ops).
+- `Interface.js` & `UploadDialog.html`: Giao diện người dùng và Menu.
+- `Tests.js`: Các bài kiểm tra hệ thống.
+- `Mã.js`: File tổng hợp và giới thiệu.
 
 ## 🚀 Hướng dẫn nhanh
 1. **Cấu hình:** Điền thông tin API Key và Drive Folder ID vào sheet `Config`.

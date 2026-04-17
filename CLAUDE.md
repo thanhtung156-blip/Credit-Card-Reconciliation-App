@@ -15,15 +15,14 @@ Hệ thống đối soát hóa đơn tự động.
 | Storage | Google Drive |
 | Auth | Service Account (JWT) |
 
-## CẤU TRÚC CODE
-- `Mã.js`: Entry point & Folder Map.
-- `01_Core/`: `Constants.js` (Config), `Utils.js` (Date/Amount parsing), `Config.js` (Sheet lookup).
-- `02_Sheets/`: `SheetOps.js` (Formatting, Conditional Rules).
-- `03_Services/`: 
-    - `Matching.js`: Logic đối soát chính (Score-based).
-    - `DriveOps.js`: Quản lý file, folder và Auth Vision API.
-- `04_UI/`: `UI.js` (Sidebar, Upload Dialog).
-- `05_Testing/`: `Tests.js` (Diagnostic tests).
+## CẤU TRÚC CODE (Consolidated)
+- `Mã.js`: Entry point.
+- `Core.js`: Configuration, Constants, Utils.
+- `Services.js`: Matching, DriveOps, SheetOps, Import.
+- `Interface.js`: Menu & UI Logic.
+- `UploadDialog.html`: Upload interface.
+- `Tests.js`: Diagnostic tests.
+
 
 ## CRITICAL CONSTRAINTS ⚠️
 - ⚠️ **Match Keys:** Phải khớp tuyệt đối về **Currency** và **Amount**. **Date** cho phép lệch ±4 ngày.
