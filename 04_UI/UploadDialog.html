@@ -1,0 +1,215 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <base target="_top">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --primary: #4f46e5;
+      --primary-hover: #4338ca;
+      --bg: #f8fafc;
+      --card: #ffffff;
+      --text: #1e293b;
+      --border: #e2e8f0;
+    }
+    * { box-sizing: border-box; }
+    body { 
+      font-family: 'Inter', sans-serif; 
+      background: var(--bg); 
+      color: var(--text); 
+      padding: 24px; 
+      margin: 0;
+    }
+    .container { max-width: 480px; margin: 0 auto; }
+    
+    header { margin-bottom: 24px; }
+    h2 { font-size: 1.5rem; font-weight: 700; color: #0f172a; margin: 0; }
+    p.subtitle { color: #64748b; font-size: 0.875rem; margin: 4px 0 0; }
+
+    .upload-card {
+      background: var(--card);
+      border-radius: 16px;
+      padding: 32px;
+      box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.05);
+      border: 1px solid var(--border);
+      transition: transform 0.2s;
+    }
+
+    #drop-area {
+      border: 2px dashed #cbd5e1;
+      border-radius: 12px;
+      padding: 40px 20px;
+      text-align: center;
+      cursor: pointer;
+      transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+      background: #fafafa;
+      position: relative;
+    }
+    #drop-area.highlight {
+      border-color: var(--primary);
+      background: #f5f7ff;
+      transform: scale(1.02);
+    }
+    #drop-area i {
+      font-size: 2.5rem;
+      color: #94a3b8;
+      display: block;
+      margin-bottom: 12px;
+    }
+    #drop-area p { margin: 0; color: #475569; font-weight: 500; }
+    #drop-area span { color: #94a3b8; font-size: 0.75rem; display: block; margin-top: 8px; }
+
+    .preview-container {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(64px, 1fr));
+      gap: 12px;
+      margin-top: 24px;
+      max-height: 150px;
+      overflow-y: auto;
+      padding: 4px;
+    }
+    .preview-img {
+      width: 64px;
+      height: 64px;
+      object-fit: cover;
+      border-radius: 8px;
+      border: 2px solid white;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+    }
+
+    .btn-main {
+      background: var(--primary);
+      color: white;
+      width: 100%;
+      padding: 14px 20px;
+      border-radius: 10px;
+      border: none;
+      font-weight: 600;
+      font-size: 0.95rem;
+      cursor: pointer;
+      margin-top: 24px;
+      transition: all 0.2s;
+      display: none; /* Hidden until files added */
+      box-shadow: 0 4px 6px -1px rgba(79, 70, 229, 0.2);
+    }
+    .btn-main:hover {
+      background: var(--primary-hover);
+      box-shadow: 0 10px 15px -3px rgba(79, 70, 229, 0.3);
+      transform: translateY(-1px);
+    }
+    .btn-main:disabled {
+      background: #94a3b8;
+      cursor: not-allowed;
+      transform: none;
+    }
+
+    .footer-note {
+      text-align: center;
+      margin-top: 20px;
+      font-size: 0.75rem;
+      color: #94a3b8;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <header>
+      <h2>Add Invoices</h2>
+      <p class="subtitle">Upload or paste receipt images to Drive</p>
+    </header>
+
+    <div class="upload-card">
+      <div id="drop-area">
+        <i>📂</i>
+        <p>Drop images here or <b>Paste</b></p>
+        <span>Supports JPG, PNG, WebP</span>
+      </div>
+
+      <div class="preview-container" id="preview"></div>
+
+      <button class="btn-main" id="upload-btn" onclick="uploadFiles()">
+        Upload All to Drive
+      </button>
+    </div>
+
+    <p class="footer-note">
+      Files will be saved to your Root Drive folder with unique names.
+    </p>
+  </div>
+
+  <script>
+    let filesData = [];
+
+    // Handle Paste (Ctrl+V)
+    document.addEventListener('paste', function(e) {
+      const items = (e.clipboardData || e.originalEvent.clipboardData).items;
+      for (let i = 0; i < items.length; i++) {
+        if (items[i].type.indexOf('image') !== -1) {
+          addFile(items[i].getAsFile());
+        }
+      }
+    });
+
+    // Handle Drag and Drop
+    const dropArea = document.getElementById('drop-area');
+    ['dragenter', 'dragover', 'dragleave', 'drop'].forEach(name => {
+      dropArea.addEventListener(name, e => { e.preventDefault(); e.stopPropagation(); });
+    });
+
+    dropArea.addEventListener('dragover', () => dropArea.classList.add('highlight'));
+    dropArea.addEventListener('dragleave', () => dropArea.classList.remove('highlight'));
+    dropArea.addEventListener('drop', e => {
+      dropArea.classList.remove('highlight');
+      const files = e.dataTransfer.files;
+      for (let f of files) if (f.type.startsWith('image/')) addFile(f);
+    });
+
+    // Click to select
+    dropArea.addEventListener('click', () => {
+      const input = document.createElement('input');
+      input.type = 'file';
+      input.multiple = true;
+      input.accept = 'image/*';
+      input.onchange = e => {
+        for (let f of e.target.files) addFile(f);
+      };
+      input.click();
+    });
+
+    function addFile(file) {
+      const reader = new FileReader();
+      reader.onload = function(e) {
+        filesData.push({ 
+          base64: e.target.result.split(',')[1], 
+          name: file.name || 'pasted_image.png',
+          type: file.type || 'image/png'
+        });
+        
+        // Show preview
+        const img = document.createElement('img');
+        img.src = e.target.result;
+        img.className = 'preview-img';
+        document.getElementById('preview').appendChild(img);
+        
+        // Show button
+        document.getElementById('upload-btn').style.display = 'block';
+      };
+      reader.readAsDataURL(file);
+    }
+
+    function uploadFiles() {
+      if (filesData.length === 0) return;
+      const btn = document.getElementById('upload-btn');
+      btn.innerText = '🚀 Uploading ' + filesData.length + ' files...';
+      btn.disabled = true;
+
+      // Close immediately and continue in sidebar
+      google.script.run
+        .withSuccessHandler(() => {
+          google.script.host.close();
+        })
+        .handleMultiUpload(filesData);
+    }
+  </script>
+</body>
+</html>
