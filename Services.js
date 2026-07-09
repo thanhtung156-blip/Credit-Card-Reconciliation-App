@@ -787,87 +787,85 @@ function createOrUpdateDaySheet(wb, date, mainSheet) {
 }
 
 /**
- * Inserts the invoice image blob into the day sheet, positioned horizontally with 1-cell gap
- * and scaled down proportionally if it exceeds 8 columns wide or 23 rows tall.
+ * Inserts the invoice image blob into the day sheet, and triggers the layout formatting.
  */
 function insertInvoiceImageToDaySheet(sheet, blob) {
   try {
-    const startRow = 2; // Keep top margin clean
-    const targetCol = getNextImageColumn(sheet);
-    
-    // Insert the image into the sheet
-    const img = sheet.insertImage(blob, targetCol, startRow);
-    
-    // Proportional scaling
-    const origWidth = img.getOriginalWidth();
-    const origHeight = img.getOriginalHeight();
-    
-    if (origWidth > 0 && origHeight > 0) {
-      // Calculate max width for 8 columns starting from targetCol
-      let maxWidthPx = 0;
-      for (let i = 0; i < 8; i++) {
-        maxWidthPx += sheet.getColumnWidth(targetCol + i) || 100;
-      }
-      
-      // Calculate max height for 23 rows starting from startRow
-      let maxHeightPx = 0;
-      for (let i = 0; i < 23; i++) {
-        maxHeightPx += sheet.getRowHeight(startRow + i) || 20;
-      }
-      
-      let scale = 1.0;
-      if (origWidth > maxWidthPx) {
-        scale = Math.min(scale, maxWidthPx / origWidth);
-      }
-      if (origHeight > maxHeightPx) {
-        scale = Math.min(scale, maxHeightPx / origHeight);
-      }
-      
-      const targetWidth = Math.round(origWidth * scale);
-      const targetHeight = Math.round(origHeight * scale);
-      
-      img.setWidth(targetWidth);
-      img.setHeight(targetHeight);
-    }
+    // Temporarily insert at A2 (Column A, Row 2)
+    sheet.insertImage(blob, 1, 2);
+    // Run the layout manager to resize and position all images side-by-side
+    arrangeAndResizeImagesInSheet(sheet);
   } catch (e) {
     logMsg(LOG.SHEET, 'ERROR', 'Failed to insert image to day sheet', e.message);
   }
 }
 
 /**
- * Calculates the next available column for image insertion, leaving a 1-column gap.
+ * Resizes all images in the day sheet to at most 500px in width/height,
+ * and arranges them side-by-side with a 10px horizontal gap, anchored to cell A2.
  */
-function getNextImageColumn(sheet) {
+function arrangeAndResizeImagesInSheet(sheet) {
+  if (!sheet) {
+    sheet = SpreadsheetApp.getActiveSheet();
+  }
+  const sheetName = sheet.getName();
+  if (!isDaySheet(sheetName)) {
+    throw new Error('Please select a day sheet (format DD-MM) first.');
+  }
+
   const images = sheet.getImages();
   if (images.length === 0) {
-    return 1; // Column A
+    return;
   }
-  
-  let maxEndCol = 1;
-  images.forEach(img => {
+
+  let currentXOffset = 0;
+  const startRow = 2; // Row 2
+  const startCol = 1; // Column A (1)
+  const anchorCell = sheet.getRange(startRow, startCol);
+  const maxDim = 500;
+
+  images.forEach((img, idx) => {
     try {
-      const anchor = img.getAnchorCell();
-      if (!anchor) return;
-      
-      const startCol = anchor.getColumn();
-      const widthPx = img.getWidth();
-      
-      let currentWidth = 0;
-      let col = startCol;
-      while (currentWidth < widthPx && col < 1000) {
-        currentWidth += sheet.getColumnWidth(col) || 100;
-        col++;
+      // 1. Get original dimensions
+      let origWidth = img.getOriginalWidth();
+      let origHeight = img.getOriginalHeight();
+
+      // Fallback to current dimensions if original size is not available
+      if (!origWidth || origWidth <= 0) {
+        origWidth = img.getWidth() || 300;
       }
-      const endCol = col - 1;
-      if (endCol > maxEndCol) {
-        maxEndCol = endCol;
+      if (!origHeight || origHeight <= 0) {
+        origHeight = img.getHeight() || 400;
       }
+
+      // 2. Proportional scaling to fit within maxDim x maxDim
+      let scale = 1.0;
+      if (origWidth > maxDim) {
+        scale = Math.min(scale, maxDim / origWidth);
+      }
+      if (origHeight > maxDim) {
+        scale = Math.min(scale, maxDim / origHeight);
+      }
+
+      const targetWidth = Math.round(origWidth * scale);
+      const targetHeight = Math.round(origHeight * scale);
+
+      img.setWidth(targetWidth);
+      img.setHeight(targetHeight);
+
+      // 3. Anchor and position side-by-side with 10px horizontal gap
+      img.setAnchorCell(anchorCell);
+      img.setAnchorCellXOffset(currentXOffset);
+      img.setAnchorCellYOffset(0);
+
+      // Advance offset by width + 10px gap
+      currentXOffset += targetWidth + 10;
     } catch (e) {
-      // Ignore errors parsing specific image anchors
+      logMsg(LOG.SHEET, 'ERROR', `Failed to arrange/resize image ${idx + 1}`, e.message);
     }
   });
-  
-  return maxEndCol + 2; // Leave a 1-column gap (starts at maxEndCol + 2)
+
+  logMsg(LOG.SHEET, 'INFO', `Arranged and resized ${images.length} images in sheet ${sheetName}`);
 }
 
 

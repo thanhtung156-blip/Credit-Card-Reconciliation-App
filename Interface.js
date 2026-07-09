@@ -3,6 +3,7 @@ function onOpen() {
     .createMenu('💳 Corporate Card')
     .addItem('📷 Upload/Paste Invoices (to Drive)', 'showUploadDialog')
     .addItem('🔍 Scan Drive Folder & Reconcile', 'processInvoicesFromDrive')
+    .addItem('📏 Arrange & Resize Images', 'arrangeActiveSheetImagesMenu')
     .addSeparator()
     .addItem('✅ Validate before export', 'validateBeforeExportMenu')
     .addItem('🔧 Check Configuration', 'testConfig')
@@ -166,3 +167,16 @@ Step 5 — Export:
 
   SpreadsheetApp.getUi().alert(helpText);
 }
+
+/**
+ * Menu action to resize and arrange all images in the active day sheet.
+ */
+function arrangeActiveSheetImagesMenu() {
+  try {
+    arrangeAndResizeImagesInSheet();
+    SpreadsheetApp.getUi().alert('Images have been arranged and resized successfully.');
+  } catch (e) {
+    SpreadsheetApp.getUi().alert('Error: ' + e.message);
+  }
+}
+

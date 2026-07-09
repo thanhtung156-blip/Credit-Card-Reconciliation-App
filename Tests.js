@@ -133,11 +133,13 @@ function testFormatAndParseDaySheetName() {
 
 function testImageAutoSpacingAndScaling() {
   const mockImages = [];
-  const colWidths = { 1: 100, 2: 100, 3: 100, 4: 100, 5: 100, 6: 100, 7: 100, 8: 100, 9: 100, 10: 100 };
   const mockSheet = {
+    getName: () => '27-02',
     getImages: () => mockImages,
-    getColumnWidth: (col) => colWidths[col] || 100,
-    getRowHeight: (row) => 20,
+    getRange: (row, col) => ({
+      getRow: () => row,
+      getColumn: () => col
+    }),
     insertImage: (blob, col, row) => {
       const mockImg = {
         width: (blob && blob.width) || 400,
@@ -146,53 +148,46 @@ function testImageAutoSpacingAndScaling() {
         origHeight: (blob && blob.height) || 600,
         col: col,
         row: row,
+        xOffset: 0,
+        yOffset: 0,
+        anchor: null,
         getOriginalWidth: () => mockImg.origWidth,
         getOriginalHeight: () => mockImg.origHeight,
         getWidth: () => mockImg.width,
         getHeight: () => mockImg.height,
         setWidth: (w) => { mockImg.width = w; },
         setHeight: (h) => { mockImg.height = h; },
-        getAnchorCell: () => ({
+        setAnchorCell: (cell) => { mockImg.anchor = cell; },
+        setAnchorCellXOffset: (x) => { mockImg.xOffset = x; },
+        setAnchorCellYOffset: (y) => { mockImg.yOffset = y; },
+        getAnchorCell: () => mockImg.anchor || {
           getColumn: () => mockImg.col,
           getRow: () => mockImg.row
-        })
+        }
       };
       mockImages.push(mockImg);
       return mockImg;
     }
   };
 
-  // Test 1: Empty sheet next col should be 1
-  const col1 = getNextImageColumn(mockSheet);
-  if (col1 !== 1) {
-    return { name: 'testImageAutoSpacingAndScaling', passed: false, error: 'Expected first column to be 1, got ' + col1 };
+  // Test 1: Insert first image (800x400 px) -> should resize to 500x250 px, offset 0
+  insertInvoiceImageToDaySheet(mockSheet, { width: 800, height: 400 });
+  const img1 = mockImages[0];
+  if (img1.width !== 500 || img1.height !== 250) {
+    return { name: 'testImageAutoSpacingAndScaling', passed: false, error: `Img 1 expected 500x250, got ${img1.width}x${img1.height}` };
+  }
+  if (img1.xOffset !== 0 || img1.yOffset !== 0) {
+    return { name: 'testImageAutoSpacingAndScaling', passed: false, error: `Img 1 expected offset 0, got ${img1.xOffset}, ${img1.yOffset}` };
   }
 
-  // Test 2: Insert one image (orig size 400x600 px).
-  // Column width is 100px. 400px spans 4 columns (A, B, C, D) -> cols 1, 2, 3, 4.
-  // endCol = 4. Next col should be 4 + 2 = 6 (leaving col 5 empty).
-  mockSheet.insertImage('dummy-blob', 1, 2);
-  const col2 = getNextImageColumn(mockSheet);
-  if (col2 !== 6) {
-    return { name: 'testImageAutoSpacingAndScaling', passed: false, error: 'Expected next column after 400px image to be 6, got ' + col2 };
+  // Test 2: Insert second image (300x600 px) -> should resize to 250x500 px, offset 510
+  insertInvoiceImageToDaySheet(mockSheet, { width: 300, height: 600 });
+  const img2 = mockImages[1];
+  if (img2.width !== 250 || img2.height !== 500) {
+    return { name: 'testImageAutoSpacingAndScaling', passed: false, error: `Img 2 expected 250x500, got ${img2.width}x${img2.height}` };
   }
-
-  // Test 3: Insert image at 6 and check scaling.
-  // Maximum width for 8 cells from column 6: 8 * 100 = 800px.
-  // Maximum height for 23 cells from row 2: 23 * 20 = 460px.
-  // Large image: 1200x900px. Aspect ratio is 4:3.
-  // scale = min(800/1200, 460/900) = min(0.667, 0.511) = 0.51111...
-  // Expected width: 1200 * 0.51111 = 613
-  // Expected height: 900 * 0.51111 = 460
-  insertInvoiceImageToDaySheet(mockSheet, { width: 1200, height: 900 });
-  
-  const lastImg = mockImages[mockImages.length - 1];
-  if (lastImg.col !== 6) {
-    return { name: 'testImageAutoSpacingAndScaling', passed: false, error: 'Expected large image to start at column 6, got ' + lastImg.col };
-  }
-  
-  if (lastImg.width !== 613 || lastImg.height !== 460) {
-    return { name: 'testImageAutoSpacingAndScaling', passed: false, error: `Expected size 613x460, got ${lastImg.width}x${lastImg.height}` };
+  if (img2.xOffset !== 510 || img2.yOffset !== 0) {
+    return { name: 'testImageAutoSpacingAndScaling', passed: false, error: `Img 2 expected X offset 510, got ${img2.xOffset}` };
   }
 
   return { name: 'testImageAutoSpacingAndScaling', passed: true, error: null };
