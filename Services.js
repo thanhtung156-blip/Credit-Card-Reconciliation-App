@@ -875,6 +875,34 @@ function arrangeAndResizeImagesInSheet(sheet) {
   logMsg(LOG.SHEET, 'INFO', `Arranged and resized ${images.length} images in sheet ${sheetName}`);
 }
 
+/**
+ * Resizes and arranges images in all day sheets (format DD-MM) in the spreadsheet.
+ */
+function arrangeAllSheetsImages() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sheets = ss.getSheets();
+  const processedSheets = [];
+  const errors = [];
+
+  sheets.forEach(sheet => {
+    const name = sheet.getName();
+    if (isDaySheet(name)) {
+      try {
+        arrangeAndResizeImagesInSheet(sheet);
+        processedSheets.push(name);
+      } catch (e) {
+        errors.push(`${name}: ${e.message}`);
+      }
+    }
+  });
+
+  if (errors.length > 0) {
+    throw new Error('Failed to arrange images in some sheets:\n' + errors.join('\n'));
+  }
+
+  return processedSheets;
+}
+
 
 /**
  * Write VLOOKUP formulas in Col R for given row range.

@@ -169,12 +169,16 @@ Step 5 — Export:
 }
 
 /**
- * Menu action to resize and arrange all images in the active day sheet.
+ * Menu action to resize and arrange all images in all day sheets of the spreadsheet.
  */
 function arrangeActiveSheetImagesMenu() {
   try {
-    arrangeAndResizeImagesInSheet();
-    SpreadsheetApp.getUi().alert('Images have been arranged and resized successfully.');
+    const processed = arrangeAllSheetsImages();
+    if (processed.length === 0) {
+      SpreadsheetApp.getUi().alert('No day sheets (format DD-MM) found to arrange.');
+    } else {
+      SpreadsheetApp.getUi().alert(`Images have been arranged and resized successfully in ${processed.length} sheet(s):\n${processed.join(', ')}`);
+    }
   } catch (e) {
     SpreadsheetApp.getUi().alert('Error: ' + e.message);
   }
