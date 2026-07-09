@@ -823,12 +823,13 @@ function arrangeAndResizeImagesInSheet(sheet) {
   const startCol = 1; // Column A (1)
   const anchorCell = sheet.getRange(startRow, startCol);
   const maxDim = 500;
+  const errors = [];
 
   images.forEach((img, idx) => {
     try {
       // 1. Get original dimensions
-      let origWidth = img.getOriginalWidth();
-      let origHeight = img.getOriginalHeight();
+      let origWidth = img.getInherentWidth();
+      let origHeight = img.getInherentHeight();
 
       // Fallback to current dimensions if original size is not available
       if (!origWidth || origWidth <= 0) {
@@ -861,9 +862,15 @@ function arrangeAndResizeImagesInSheet(sheet) {
       // Advance offset by width + 10px gap
       currentXOffset += targetWidth + 10;
     } catch (e) {
-      logMsg(LOG.SHEET, 'ERROR', `Failed to arrange/resize image ${idx + 1}`, e.message);
+      const errMsg = `Image ${idx + 1}: ${e.message}`;
+      logMsg(LOG.SHEET, 'ERROR', errMsg);
+      errors.push(errMsg);
     }
   });
+
+  if (errors.length > 0) {
+    throw new Error('Failed to arrange some images:\n' + errors.join('\n'));
+  }
 
   logMsg(LOG.SHEET, 'INFO', `Arranged and resized ${images.length} images in sheet ${sheetName}`);
 }
