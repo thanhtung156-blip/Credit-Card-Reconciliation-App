@@ -16,7 +16,7 @@ function onOpen() {
 }
 
 function showUploadDialog() {
-  const html = HtmlService.createHtmlOutputFromFile('04_UI/UploadDialog')
+  const html = HtmlService.createHtmlOutputFromFile('UploadDialog')
     .setTitle('Upload/Paste Invoices')
     .setWidth(550)
     .setHeight(400); // Reduced height as scan button is removed

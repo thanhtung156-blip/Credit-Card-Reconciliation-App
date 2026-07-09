@@ -1,7 +1,9 @@
-﻿/**
+/**
  * Core Processing Module: Matches invoices to statement rows using AI.
- * Phases A (OCR) â†’ B (Aggregate) â†’ C (AI Parse) â†’ D (Match & Store)
+ * Phases A (OCR) → B (Aggregate) → C (AI Parse) → D (Match & Store)
  */
+
+const _clearedSheets = {};
 
 /**
  * Entry Point: Scans the root Drive folder for images and processes them.
@@ -234,13 +236,16 @@ function phaseD_applyResults(mainSheet, geminiResults, statementRows, ocrResults
           if (matchedRow) {
             matchedRow.status = STATUS.MATCHED;
             if (fileObj && matchedRow.date && driveRootFolder) {
-              showProcessingSidebar(sheetName, `  âœ¨ Matched ${fileName} to Row ${matchedRow.rowNum}`);
+              showProcessingSidebar(sheetName, `  ✨ Matched ${fileName} to Row ${matchedRow.rowNum}`);
               renameFileWithPrefix(fileObj, matchedRow.date);
-              moveImageToDoneFolder(fileObj.getBlob(), driveRootFolder.getId(), matchedRow.date);
+              const blob = fileObj.getBlob();
+              moveImageToDoneFolder(blob, driveRootFolder.getId(), matchedRow.date);
               fileObj.setTrashed(true); 
-              createOrUpdateDaySheet(SpreadsheetApp.getActiveSpreadsheet(), matchedRow.date, mainSheet);
+              const daySheet = createOrUpdateDaySheet(SpreadsheetApp.getActiveSpreadsheet(), matchedRow.date, mainSheet);
+              insertInvoiceImageToDaySheet(daySheet, blob);
             }
           }
+
           applyMatch(mainSheet, matchResult.row, sheetName, ocr.imageIndex, result);
           summary.matched++;
         }
@@ -769,25 +774,102 @@ function createOrUpdateDaySheet(wb, date, mainSheet) {
   let sheet = wb.getSheetByName(sheetName);
   if (!sheet) {
     sheet = wb.insertSheet(sheetName);
-  }
-
-  const lastRow = mainSheet.getLastRow();
-  if (lastRow < DATA_START_ROW) return sheet;
-
-  const allData = mainSheet.getRange(DATA_START_ROW, 1, lastRow - DATA_START_ROW + 1, 24).getValues();
-
-  const dateStr = formatDaySheetName(date);
-  const matchingRows = allData.filter(row => {
-    const d = parseDate(row[COL.DOC_DATE - 1]);
-    return d && formatDaySheetName(d) === dateStr;
-  });
-
-  // Create blank sheet as requested
-  if (sheet.getLastRow() > 0) {
-    sheet.clear();
+    _clearedSheets[sheetName] = true;
+  } else {
+    if (!_clearedSheets[sheetName]) {
+      if (sheet.getLastRow() > 0 || sheet.getImages().length > 0) {
+        sheet.clear();
+      }
+      _clearedSheets[sheetName] = true;
+    }
   }
   return sheet;
 }
+
+/**
+ * Inserts the invoice image blob into the day sheet, positioned horizontally with 1-cell gap
+ * and scaled down proportionally if it exceeds 8 columns wide or 23 rows tall.
+ */
+function insertInvoiceImageToDaySheet(sheet, blob) {
+  try {
+    const startRow = 2; // Keep top margin clean
+    const targetCol = getNextImageColumn(sheet);
+    
+    // Insert the image into the sheet
+    const img = sheet.insertImage(blob, targetCol, startRow);
+    
+    // Proportional scaling
+    const origWidth = img.getOriginalWidth();
+    const origHeight = img.getOriginalHeight();
+    
+    if (origWidth > 0 && origHeight > 0) {
+      // Calculate max width for 8 columns starting from targetCol
+      let maxWidthPx = 0;
+      for (let i = 0; i < 8; i++) {
+        maxWidthPx += sheet.getColumnWidth(targetCol + i) || 100;
+      }
+      
+      // Calculate max height for 23 rows starting from startRow
+      let maxHeightPx = 0;
+      for (let i = 0; i < 23; i++) {
+        maxHeightPx += sheet.getRowHeight(startRow + i) || 20;
+      }
+      
+      let scale = 1.0;
+      if (origWidth > maxWidthPx) {
+        scale = Math.min(scale, maxWidthPx / origWidth);
+      }
+      if (origHeight > maxHeightPx) {
+        scale = Math.min(scale, maxHeightPx / origHeight);
+      }
+      
+      const targetWidth = Math.round(origWidth * scale);
+      const targetHeight = Math.round(origHeight * scale);
+      
+      img.setWidth(targetWidth);
+      img.setHeight(targetHeight);
+    }
+  } catch (e) {
+    logMsg(LOG.SHEET, 'ERROR', 'Failed to insert image to day sheet', e.message);
+  }
+}
+
+/**
+ * Calculates the next available column for image insertion, leaving a 1-column gap.
+ */
+function getNextImageColumn(sheet) {
+  const images = sheet.getImages();
+  if (images.length === 0) {
+    return 1; // Column A
+  }
+  
+  let maxEndCol = 1;
+  images.forEach(img => {
+    try {
+      const anchor = img.getAnchorCell();
+      if (!anchor) return;
+      
+      const startCol = anchor.getColumn();
+      const widthPx = img.getWidth();
+      
+      let currentWidth = 0;
+      let col = startCol;
+      while (currentWidth < widthPx && col < 1000) {
+        currentWidth += sheet.getColumnWidth(col) || 100;
+        col++;
+      }
+      const endCol = col - 1;
+      if (endCol > maxEndCol) {
+        maxEndCol = endCol;
+      }
+    } catch (e) {
+      // Ignore errors parsing specific image anchors
+    }
+  });
+  
+  return maxEndCol + 2; // Leave a 1-column gap (starts at maxEndCol + 2)
+}
+
 
 /**
  * Write VLOOKUP formulas in Col R for given row range.

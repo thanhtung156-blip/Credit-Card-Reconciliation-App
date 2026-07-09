@@ -70,7 +70,8 @@ function runAllTests() {
     testDateDiff, 
     testMatchToStatement,
     testParseGeminiBatchResponse, 
-    testFormatAndParseDaySheetName
+    testFormatAndParseDaySheetName,
+    testImageAutoSpacingAndScaling
   ];
   
   const results = tests.map(fn => {
@@ -129,3 +130,71 @@ function testFormatAndParseDaySheetName() {
   const pass = name === '27-02';
   return { name: 'testFormatAndParseDaySheetName', passed: pass, error: pass ? null : 'Format failed' };
 }
+
+function testImageAutoSpacingAndScaling() {
+  const mockImages = [];
+  const colWidths = { 1: 100, 2: 100, 3: 100, 4: 100, 5: 100, 6: 100, 7: 100, 8: 100, 9: 100, 10: 100 };
+  const mockSheet = {
+    getImages: () => mockImages,
+    getColumnWidth: (col) => colWidths[col] || 100,
+    getRowHeight: (row) => 20,
+    insertImage: (blob, col, row) => {
+      const mockImg = {
+        width: (blob && blob.width) || 400,
+        height: (blob && blob.height) || 600,
+        origWidth: (blob && blob.width) || 400,
+        origHeight: (blob && blob.height) || 600,
+        col: col,
+        row: row,
+        getOriginalWidth: () => mockImg.origWidth,
+        getOriginalHeight: () => mockImg.origHeight,
+        getWidth: () => mockImg.width,
+        getHeight: () => mockImg.height,
+        setWidth: (w) => { mockImg.width = w; },
+        setHeight: (h) => { mockImg.height = h; },
+        getAnchorCell: () => ({
+          getColumn: () => mockImg.col,
+          getRow: () => mockImg.row
+        })
+      };
+      mockImages.push(mockImg);
+      return mockImg;
+    }
+  };
+
+  // Test 1: Empty sheet next col should be 1
+  const col1 = getNextImageColumn(mockSheet);
+  if (col1 !== 1) {
+    return { name: 'testImageAutoSpacingAndScaling', passed: false, error: 'Expected first column to be 1, got ' + col1 };
+  }
+
+  // Test 2: Insert one image (orig size 400x600 px).
+  // Column width is 100px. 400px spans 4 columns (A, B, C, D) -> cols 1, 2, 3, 4.
+  // endCol = 4. Next col should be 4 + 2 = 6 (leaving col 5 empty).
+  mockSheet.insertImage('dummy-blob', 1, 2);
+  const col2 = getNextImageColumn(mockSheet);
+  if (col2 !== 6) {
+    return { name: 'testImageAutoSpacingAndScaling', passed: false, error: 'Expected next column after 400px image to be 6, got ' + col2 };
+  }
+
+  // Test 3: Insert image at 6 and check scaling.
+  // Maximum width for 8 cells from column 6: 8 * 100 = 800px.
+  // Maximum height for 23 cells from row 2: 23 * 20 = 460px.
+  // Large image: 1200x900px. Aspect ratio is 4:3.
+  // scale = min(800/1200, 460/900) = min(0.667, 0.511) = 0.51111...
+  // Expected width: 1200 * 0.51111 = 613
+  // Expected height: 900 * 0.51111 = 460
+  insertInvoiceImageToDaySheet(mockSheet, { width: 1200, height: 900 });
+  
+  const lastImg = mockImages[mockImages.length - 1];
+  if (lastImg.col !== 6) {
+    return { name: 'testImageAutoSpacingAndScaling', passed: false, error: 'Expected large image to start at column 6, got ' + lastImg.col };
+  }
+  
+  if (lastImg.width !== 613 || lastImg.height !== 460) {
+    return { name: 'testImageAutoSpacingAndScaling', passed: false, error: `Expected size 613x460, got ${lastImg.width}x${lastImg.height}` };
+  }
+
+  return { name: 'testImageAutoSpacingAndScaling', passed: true, error: null };
+}
+
