@@ -9,3 +9,4 @@
  * - Tests.js: Diagnostic tests.
  * - Mã.js: Entry point.
  */
+// Sync trigger comment

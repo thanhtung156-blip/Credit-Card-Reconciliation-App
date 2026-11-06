@@ -10,7 +10,6 @@ const _clearedSheets = {};
  * Matches against ALL PENDING rows in the main sheet.
  */
 function processInvoicesFromDrive() {
-  const activeSheet = SpreadsheetApp.getActiveSheet();
   const sheetName = "Drive Scan";
   
   logMsg(LOG.PROCESS, 'INFO', 'Starting batch processing from Drive folder');
@@ -20,87 +19,121 @@ function processInvoicesFromDrive() {
   const mainSheet = ss.getSheetByName(MAIN_SHEET_NAME);
   if (!mainSheet) throw new Error('Main sheet not found');
 
-  clearSidebarLog(); // Auto-clear log at start
-  showProcessingSidebar(sheetName, `ðŸš€ Starting batch processing from Drive folder...`);
+  clearSidebarLog();
+  showProcessingSidebar(sheetName, `Starting batch processing from Drive folder...`);
 
-  // 1. Get images from Drive root folder
   showProcessingSidebar(sheetName, `Phase A: Scanning root Drive folder...`);
 
   const rootFolder = DriveApp.getFolderById(config.folderId);
   const files = rootFolder.getFiles();
-  const images = [];
+  const imageFiles = [];
   let fileCounter = 1;
   while (files.hasNext()) {
     const file = files.next();
     if (file.getMimeType().startsWith('image/')) {
-      const base64 = Utilities.base64Encode(file.getBlob().getBytes());
-      images.push({ 
-        imageIndex: fileCounter++, 
+      imageFiles.push({
+        imageIndex: fileCounter++,
         driveId: file.getId(),
-        base64: base64, 
-        imageObj: file, 
-        fileName: file.getName() 
+        imageObj: file,
+        fileName: file.getName()
       });
     }
   }
 
-  if (images.length === 0) {
-    showProcessingSidebar(sheetName, `âŒ No new images found in root folder.`);
+  if (imageFiles.length === 0) {
+    showProcessingSidebar(sheetName, `No new images found in root folder.`);
     return "No images found.";
   }
-  showProcessingSidebar(sheetName, `Found ${images.length} image(s).`);
+  showProcessingSidebar(sheetName, `Found ${imageFiles.length} image(s). Processing ${GEMINI_BATCH_SIZE} at a time.`);
 
-  // 2. Get ALL pending statement rows
+  const statementRows = loadPendingStatementRows(mainSheet);
+  const totalSummary = { matched: 0, unmatched: 0, ambiguous: 0, errors: 0 };
+  const totalBatches = Math.ceil(imageFiles.length / GEMINI_BATCH_SIZE);
+
+  for (let i = 0; i < imageFiles.length; i += GEMINI_BATCH_SIZE) {
+    const batchNum = Math.floor(i / GEMINI_BATCH_SIZE) + 1;
+    const chunk = imageFiles.slice(i, i + GEMINI_BATCH_SIZE);
+    showProcessingSidebar(sheetName, `\n--- Batch ${batchNum}/${totalBatches} (${chunk.length} images) ---`);
+
+    const images = chunk.map(img => ({
+      imageIndex: img.imageIndex,
+      driveId: img.driveId,
+      imageObj: img.imageObj,
+      fileName: img.fileName,
+      base64: Utilities.base64Encode(img.imageObj.getBlob().getBytes())
+    }));
+
+    showProcessingSidebar(sheetName, `Running OCR...`);
+    const ocrResults = phaseA_ocrAllImages(images, config.visionJson);
+    ocrResults.forEach(r => {
+      const name = images.find(img => img.imageIndex === r.imageIndex).fileName;
+      const detail = r.success ? 'OK' : (r.error || 'empty text');
+      showProcessingSidebar(sheetName, `  ${r.success ? 'OK' : 'FAIL'} OCR: ${name} (${detail})`);
+    });
+
+    const batchPayload = phaseB_buildBatchPayload(ocrResults, statementRows);
+
+    showProcessingSidebar(sheetName, `Calling Gemini (${batchPayload.invoices.length} invoices)...`);
+    const geminiResults = phaseC_callGeminiBatch(batchPayload, config.geminiKey);
+
+    if (geminiResults.error) {
+      showProcessingSidebar(sheetName, `Gemini Error: ${geminiResults.error}`);
+    } else {
+      showProcessingSidebar(sheetName, `Parsed ${geminiResults.length} invoice(s).`);
+    }
+
+    showProcessingSidebar(sheetName, `Matching and moving files...`);
+    const summary = phaseD_applyResults(
+      mainSheet,
+      Array.isArray(geminiResults) ? geminiResults : [],
+      statementRows,
+      ocrResults,
+      rootFolder,
+      sheetName
+    );
+
+    totalSummary.matched += summary.matched;
+    totalSummary.unmatched += summary.unmatched;
+    totalSummary.ambiguous += summary.ambiguous;
+    totalSummary.errors += summary.errors;
+
+    ocrResults.filter(r => !r.success).forEach(r => {
+      try {
+        moveImageToError(r.fileObj, r.error || 'OCR failed', rootFolder);
+      } catch (e) {}
+    });
+
+    if (i + GEMINI_BATCH_SIZE < imageFiles.length) {
+      Utilities.sleep(2000);
+    }
+  }
+
+  showProcessingSidebar(sheetName, `\n=== BATCH COMPLETE ===\nMatched: ${totalSummary.matched} | Unmatched: ${totalSummary.unmatched} | Needs Review: ${totalSummary.ambiguous} | Errors: ${totalSummary.errors}`);
+
+  try {
+    sortDaySheetsChronologically(ss);
+  } catch (e) {
+    logMsg(LOG.SHEET, 'ERROR', 'Failed to sort day sheets chronologically', e.message);
+  }
+
+  return totalSummary;
+}
+
+function loadPendingStatementRows(mainSheet) {
   const lastRow = mainSheet.getLastRow();
-  let statementRows = [];
-  if (lastRow >= DATA_START_ROW) {
-    const allData = mainSheet.getRange(DATA_START_ROW, 1, lastRow - DATA_START_ROW + 1, 24).getValues();
-    statementRows = allData
-      .map((row, idx) => ({
-        rowNum: idx + DATA_START_ROW,
-        date: parseDate(row[COL.DOC_DATE - 1]),
-        amount: parseAmount(row[COL.AMOUNT_PURCHASE - 1]),
-        currency: (row[COL.CURRENCY_LOCAL - 1] || '').toString().trim().toUpperCase(),
-        merchant: (row[COL.MERCHANT - 1] || '').toString().trim(),
-        status: (row[COL.MATCH_STATUS - 1] || '').toString().trim(),
-      }))
-      .filter(r => !r.status || r.status === STATUS.PENDING);
-  }
+  if (lastRow < DATA_START_ROW) return [];
 
-  // 3. Phase A (OCR via Cloud Vision)
-  showProcessingSidebar(sheetName, `Running OCR on ${images.length} files...`);
-  const ocrResults = phaseA_ocrAllImages(images, config.visionJson);
-  ocrResults.forEach(r => {
-    showProcessingSidebar(sheetName, `  ${r.success ? 'âœ…' : 'âŒ'} OCR: ${images.find(img => img.imageIndex === r.imageIndex).fileName}`);
-  });
-
-  // 4. Phase B (Payload Building)
-  const batchPayload = phaseB_buildBatchPayload(ocrResults, statementRows);
-
-  // 5. Phase C (Gemini Model Call)
-  showProcessingSidebar(sheetName, `Phase C: Calling Gemini for batch parsing...`);
-  const geminiResults = phaseC_callGeminiBatch(batchPayload, config.geminiKey);
-  
-  if (geminiResults.error) {
-    showProcessingSidebar(sheetName, `âŒ Gemini Error: ${geminiResults.error}`);
-    return "Process failed.";
-  }
-  showProcessingSidebar(sheetName, `Parsed ${geminiResults.length} invoices successfully.`);
-
-  // 6. Phase D (Apply & Classify Files)
-  showProcessingSidebar(sheetName, `Phase D: Matching and moving files...`);
-  const summary = phaseD_applyResults(mainSheet, geminiResults, statementRows, ocrResults, rootFolder, sheetName);
-  
-  // Cleanup OCR failures
-  ocrResults.filter(r => !r.success).forEach(r => {
-    try {
-      moveImageToError(r.fileObj, r.error || 'OCR empty', rootFolder);
-    } catch(e) {}
-  });
-
-  showProcessingSidebar(sheetName, `\n=== BATCH COMPLETE ===\nMatched: ${summary.matched} | Unmatched: ${summary.unmatched} | Needs Review: ${summary.ambiguous} | Errors: ${summary.errors}`);
-  
-  return summary;
+  const allData = mainSheet.getRange(DATA_START_ROW, 1, lastRow - DATA_START_ROW + 1, 25).getValues();
+  return allData
+    .map((row, idx) => ({
+      rowNum: idx + DATA_START_ROW,
+      date: parseDate(row[COL.DOC_DATE - 1]),
+      amount: parseAmount(row[COL.AMOUNT_PURCHASE - 1]),
+      currency: (row[COL.CURRENCY_LOCAL - 1] || '').toString().trim().toUpperCase(),
+      merchant: (row[COL.MERCHANT - 1] || '').toString().trim(),
+      status: (row[COL.MATCH_STATUS - 1] || '').toString().trim(),
+    }))
+    .filter(r => !r.status || r.status === STATUS.PENDING);
 }
 
 /**
@@ -128,7 +161,7 @@ function processImagesInSheet() {
   const lastRow = mainSheet.getLastRow();
   let statementRows = [];
   if (lastRow >= DATA_START_ROW) {
-    const allData = mainSheet.getRange(DATA_START_ROW, 1, lastRow - DATA_START_ROW + 1, 24).getValues();
+    const allData = mainSheet.getRange(DATA_START_ROW, 1, lastRow - DATA_START_ROW + 1, 25).getValues();
     statementRows = allData
       .map((row, idx) => ({
         rowNum: idx + DATA_START_ROW,
@@ -152,6 +185,13 @@ function processImagesInSheet() {
   try { rootFolder = DriveApp.getFolderById(config.folderId); } catch (e) {}
 
   phaseD_applyResults(mainSheet, geminiResults, statementRows, ocrResults, rootFolder, sheetName);
+
+  // Sort day sheets chronologically
+  try {
+    sortDaySheetsChronologically(ss);
+  } catch (e) {
+    logMsg(LOG.SHEET, 'ERROR', 'Failed to sort day sheets chronologically', e.message);
+  }
 }
 
 /**
@@ -161,13 +201,14 @@ function phaseA_ocrAllImages(images, visionJson) {
   const results = [];
   if (!images || !Array.isArray(images)) return results;
   
-  images.forEach(img => {
+  images.forEach((img, idx) => {
+    if (idx > 0) Utilities.sleep(500);
     const ocrResult = callCloudVision(img.base64, visionJson);
     results.push({ 
       imageIndex: img.imageIndex, 
       rawText: ocrResult.text || '', 
-      success: !ocrResult.error, 
-      error: ocrResult.error,
+      success: !ocrResult.error && !!(ocrResult.text || '').trim(), 
+      error: ocrResult.error || (!(ocrResult.text || '').trim() ? 'OCR returned empty text' : null),
       fileObj: img.imageObj 
     });
   });
@@ -213,7 +254,10 @@ function phaseD_applyResults(mainSheet, geminiResults, statementRows, ocrResults
     try {
       const result = Array.isArray(geminiResults) ? geminiResults.find(r => (r.imageIndex || r.index) == ocr.imageIndex) : null;
       const fileObj = ocr.fileObj;
-      const fileName = fileObj ? fileObj.getName() : `Image_${ocr.imageIndex}`;
+      
+      // Determine if it is a Drive File or an in-sheet OverGridImage
+      const isDriveFile = fileObj && (typeof fileObj.getName === 'function');
+      const fileName = isDriveFile ? fileObj.getName() : `Image_${ocr.imageIndex}`;
       
       let finalStatus = STATUS.PENDING;
       let matchReason = "No AI result returned for this image";
@@ -233,20 +277,58 @@ function phaseD_applyResults(mainSheet, geminiResults, statementRows, ocrResults
         } else {
           finalStatus = STATUS.MATCHED;
           const matchedRow = statementRows.find(r => r.rowNum === matchResult.row);
+          let imageCopied = false;
+          const invoiceDate = parseDate(result.date) || (matchedRow && matchedRow.date);
+          const destSheetName = invoiceDate ? formatDaySheetName(invoiceDate) : sheetName;
+
           if (matchedRow) {
             matchedRow.status = STATUS.MATCHED;
-            if (fileObj && matchedRow.date && driveRootFolder) {
-              showProcessingSidebar(sheetName, `  ✨ Matched ${fileName} to Row ${matchedRow.rowNum}`);
-              renameFileWithPrefix(fileObj, matchedRow.date);
+            
+            if (fileObj && invoiceDate) {
+              showProcessingSidebar(sheetName, `  ✨ Matched ${fileName} to Row ${matchedRow.rowNum} → sheet ${destSheetName}`);
               const blob = fileObj.getBlob();
-              moveImageToDoneFolder(blob, driveRootFolder.getId(), matchedRow.date);
-              fileObj.setTrashed(true); 
-              const daySheet = createOrUpdateDaySheet(SpreadsheetApp.getActiveSpreadsheet(), matchedRow.date, mainSheet);
-              insertInvoiceImageToDaySheet(daySheet, blob);
+
+              // 1. Move Drive file to DONE folder with [Done-DD-MM] prefix
+              if (isDriveFile && driveRootFolder) {
+                try {
+                  renameFileWithPrefix(fileObj, invoiceDate);
+                  const doneFolder = getOrCreateDoneFolder(driveRootFolder, invoiceDate);
+                  fileObj.moveTo(doneFolder);
+                } catch (driveErr) {
+                  logMsg(LOG.DRIVE, 'ERROR', `Drive operations failed for ${fileName}`, driveErr.message);
+                }
+              } 
+              // 2. Archive in-sheet images to Drive with [Done-DD-MM] prefix
+              else if (!isDriveFile && driveRootFolder) {
+                try {
+                  const archiveBlob = blob.setName(buildDoneFileName(fileName, invoiceDate));
+                  moveImageToDoneFolder(archiveBlob, driveRootFolder.getId(), invoiceDate);
+                } catch (driveErr) {
+                  logMsg(LOG.DRIVE, 'ERROR', `Failed to archive in-sheet image ${fileName} to Drive`, driveErr.message);
+                }
+              }
+
+              // 3. Remove the image from the source sheet if it is an OverGridImage to prevent duplicates
+              if (!isDriveFile && typeof fileObj.remove === 'function') {
+                try {
+                  fileObj.remove();
+                } catch (removeErr) {
+                  logMsg(LOG.SHEET, 'ERROR', `Failed to remove image ${fileName} from source sheet`, removeErr.message);
+                }
+              }
+
+              // 4. Insert image into day sheet based on invoice date (not statement date)
+              try {
+                const daySheet = createOrUpdateDaySheet(SpreadsheetApp.getActiveSpreadsheet(), invoiceDate, mainSheet, sheetName);
+                insertInvoiceImageToDaySheet(daySheet, blob, matchedRow.rowNum);
+                imageCopied = true;
+              } catch (sheetErr) {
+                logMsg(LOG.SHEET, 'ERROR', `Failed to copy matched image ${fileName} to day sheet`, sheetErr.message);
+              }
             }
           }
 
-          applyMatch(mainSheet, matchResult.row, sheetName, ocr.imageIndex, result);
+          applyMatch(mainSheet, matchResult.row, destSheetName, ocr.imageIndex, result, imageCopied);
           summary.matched++;
         }
       } else {
@@ -278,14 +360,27 @@ function matchToStatement(parsedInvoice, statementRows) {
 
   const pendingRows = statementRows.filter(r => !r.status || r.status === STATUS.PENDING);
   
-  // 1. Check AI Suggestion (High Confidence)
+// 1. Check AI Suggestion (High Confidence)
   if (aiSuggestedRow) {
     const suggested = pendingRows.find(r => r.rowNum === aiSuggestedRow);
     if (suggested) {
       const dateDiffDays = dateDiff(invoiceDate, suggested.date);
       const amountMatch = Math.abs(suggested.amount - invoiceAmount) <= 1; // tight AI match
-      if (dateDiffDays <= MATCH_DATE_TOLERANCE && amountMatch) {
-         return { row: aiSuggestedRow, score: 1.0 };
+
+      // Currency must match (same rule as the score-based fallback) to avoid a
+      // wrong Gemini suggestion silently consuming an unrelated statement row.
+      const suggestedCurrency = (suggested.currency || '').toUpperCase().trim();
+      const currencyMatch = !suggestedCurrency || suggestedCurrency === invoiceCurrency.toUpperCase();
+
+      // Merchant must be at least a loose substring match when both sides have text,
+      // so two different merchants sharing a similar amount/date can't cross-match.
+      const suggestedMerchantClean = (suggested.merchant || '').toLowerCase().replace(/[^a-z]/g, '');
+      const invoiceMerchantClean = invoiceMerchant.replace(/[^a-z]/g, '');
+      const merchantMatch = !suggestedMerchantClean || !invoiceMerchantClean ||
+        suggestedMerchantClean.includes(invoiceMerchantClean) || invoiceMerchantClean.includes(suggestedMerchantClean);
+
+      if (dateDiffDays <= MATCH_DATE_TOLERANCE && amountMatch && currencyMatch && merchantMatch) {
+         return { row: aiSuggestedRow, score: 1.0, reason: 'AI-suggested row (currency+merchant verified)' };
       }
     }
   }
@@ -341,7 +436,7 @@ function matchToStatement(parsedInvoice, statementRows) {
   return { ambiguous: true, candidates: scored.map(s => s.row), reason: 'Multiple high-score candidates' };
 }
 
-function applyMatch(sheet, rowNum, daySheetName, imageIndex, invoiceData) {
+function applyMatch(sheet, rowNum, daySheetName, imageIndex, invoiceData, imageCopied) {
   const config = getConfig();
   
   // Find the account name from config to avoid relying on VLOOKUP formulas which might be overwritten
@@ -359,9 +454,10 @@ function applyMatch(sheet, rowNum, daySheetName, imageIndex, invoiceData) {
     invoiceData.summary || '',            // U (21) Summary
     config.defaults.taxId || '',          // V (22) Tax ID
     STATUS.MATCHED,                       // W (23) Match Status
-    `${daySheetName} #${imageIndex}`      // X (24) Invoice Ref
+    `${daySheetName} #${imageIndex}`,     // X (24) Invoice Ref
+    imageCopied ? "Yes" : "No"            // Y (25) Image Copied
   ]];
-  sheet.getRange(rowNum, COL.ACCOUNT_CODE, 1, 8).setValues(update);
+  sheet.getRange(rowNum, COL.ACCOUNT_CODE, 1, 9).setValues(update);
 }
 
 function applyAmbiguous(sheet, candidateRows, daySheetName, imageIndex) {
@@ -387,24 +483,92 @@ function extractEmbeddedImages(sheet) {
 }
 
 function callCloudVision(base64, visionJson) {
-  try {
-    const token = getServiceAccountToken(visionJson, VISION_SCOPE);
-    const payload = {
-      requests: [{ image: { content: base64 }, features: [{ type: 'TEXT_DETECTION' }] }]
-    };
-    const resp = UrlFetchApp.fetch(VISION_ENDPOINT, {
-      method: 'POST',
-      headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
-      payload: JSON.stringify(payload),
-      muteHttpExceptions: true
-    });
-    if (resp.getResponseCode() !== 200) return { error: `HTTP ${resp.getResponseCode()}` };
-    const data = JSON.parse(resp.getContentText());
-    return { text: data.responses?.[0]?.fullTextAnnotation?.text || '' };
-  } catch (e) { return { error: e.message }; }
+  if (!base64) return { error: 'Empty image data' };
+
+  for (let attempt = 0; attempt <= OCR_RETRY_COUNT; attempt++) {
+    try {
+      const forceRefresh = attempt > 0;
+      const token = getServiceAccountToken(visionJson, VISION_SCOPE, forceRefresh);
+      const payload = {
+        requests: [{ image: { content: base64 }, features: [{ type: 'TEXT_DETECTION' }] }]
+      };
+      const resp = UrlFetchApp.fetch(VISION_ENDPOINT, {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+        payload: JSON.stringify(payload),
+        muteHttpExceptions: true
+      });
+
+      const code = resp.getResponseCode();
+      const body = resp.getContentText();
+
+      if (code === 401 || code === 403) {
+        clearVisionTokenCache();
+        if (attempt < OCR_RETRY_COUNT) {
+          Utilities.sleep(OCR_RETRY_DELAY_MS);
+          continue;
+        }
+        return { error: `HTTP ${code}: Auth failed — check Service Account JSON in Config` };
+      }
+
+      if (code === 429 || code >= 500) {
+        if (attempt < OCR_RETRY_COUNT) {
+          logMsg(LOG.VISION, 'WARN', `OCR retry ${attempt + 1}`, `HTTP ${code}`);
+          Utilities.sleep(OCR_RETRY_DELAY_MS * (attempt + 1));
+          continue;
+        }
+        return { error: `HTTP ${code}: ${body.substring(0, 120)}` };
+      }
+
+      if (code !== 200) {
+        return { error: `HTTP ${code}: ${body.substring(0, 120)}` };
+      }
+
+      const data = JSON.parse(body);
+      const resp0 = data.responses?.[0];
+      if (resp0?.error) {
+        return { error: resp0.error.message || JSON.stringify(resp0.error) };
+      }
+      return { text: resp0?.fullTextAnnotation?.text || '' };
+    } catch (e) {
+      if (attempt < OCR_RETRY_COUNT) {
+        Utilities.sleep(OCR_RETRY_DELAY_MS);
+        continue;
+      }
+      return { error: e.message };
+    }
+  }
+  return { error: 'OCR exceeded retries' };
+}
+
+function clearVisionTokenCache() {
+  PropertiesService.getScriptProperties().deleteProperty(TOKEN_CACHE_KEY);
 }
 
 function callGeminiBatch(batchPayload, geminiKey) {
+  const invoices = batchPayload.invoices || [];
+  if (invoices.length === 0) return [];
+
+  if (invoices.length <= GEMINI_BATCH_SIZE) {
+    return callGeminiBatchSingle(batchPayload, geminiKey);
+  }
+
+  const allResults = [];
+  for (let i = 0; i < invoices.length; i += GEMINI_BATCH_SIZE) {
+    const chunkInvoices = invoices.slice(i, i + GEMINI_BATCH_SIZE);
+    const chunkPayload = { invoices: chunkInvoices, statementRows: batchPayload.statementRows };
+    logMsg(LOG.GEMINI, 'INFO', `Processing chunk ${Math.floor(i / GEMINI_BATCH_SIZE) + 1}`, `${chunkInvoices.length} invoices`);
+    const chunkResult = callGeminiBatchSingle(chunkPayload, geminiKey);
+    if (chunkResult.error) {
+      logMsg(LOG.GEMINI, 'ERROR', `Chunk failed at index ${i}`, chunkResult.error);
+      continue;
+    }
+    if (Array.isArray(chunkResult)) allResults.push(...chunkResult);
+  }
+  return allResults;
+}
+
+function callGeminiBatchSingle(batchPayload, geminiKey) {
   const config = getConfig();
   const model = config.geminiModel || 'gemini-2.0-flash';
   const endpoint = `${GEMINI_BASE_URL}/${model}:generateContent?key=${geminiKey}`;
@@ -418,7 +582,10 @@ function callGeminiBatch(batchPayload, geminiKey) {
       const resp = UrlFetchApp.fetch(endpoint, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        payload: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] }),
+        payload: JSON.stringify({
+          contents: [{ parts: [{ text: prompt }] }],
+          generationConfig: { maxOutputTokens: 8192, temperature: 0.1 },
+        }),
         muteHttpExceptions: true
       });
       
@@ -433,7 +600,12 @@ function callGeminiBatch(batchPayload, geminiKey) {
       if (code !== 200) return { error: `HTTP ${code}: ${resp.getContentText().substring(0, 50)}` };
       
       const data = JSON.parse(resp.getContentText());
-      return parseGeminiBatchResponse(data.candidates?.[0]?.content?.parts?.[0]?.text || '');
+      const parsed = parseGeminiBatchResponse(data.candidates?.[0]?.content?.parts?.[0]?.text || '');
+      const expected = (batchPayload.invoices || []).length;
+      if (Array.isArray(parsed) && parsed.length < expected) {
+        logMsg(LOG.GEMINI, 'WARN', `Partial Gemini response`, `expected ${expected}, got ${parsed.length}`);
+      }
+      return parsed;
     } catch (e) { 
       attempt++;
       Utilities.sleep(2000);
@@ -454,7 +626,24 @@ TASK:
 1. Parse each invoice to find the FINAL BILLING AMOUNT and Date.
 2. Link to a statement row if possible.
 3. Suggest the most likely Account Code from the list below based on the merchant and items.
-4. Return ONLY a valid JSON array.
+4. Generate a highly descriptive and specific "summary" field for each parsed invoice.
+5. Return ONLY a valid JSON array.
+
+RULES FOR ACCOUNT CODE MAPPING:
+- For flight tickets / airfare (vé máy bay): Select the code that relates to "Airfare" or "Flight" (e.g., Travel Expenses-Airfare).
+- For accommodation / hotels (khách sạn): Select the code relating to "Accommodation" or "Hotel".
+- For meals / drinks / restaurants / cafes (ăn uống): Select the code relating to "Meals".
+- For taxi / train / public transport / fuel (taxi, xe bus, tàu hỏa): Select the code relating to "Transportation".
+- For SIM cards / mobile plans / internet / telephone (sim điện thoại): Select the code relating to "Others expenses" or "Other expenses".
+- For client entertainment / corporate gifts (tiếp khách): Select the code relating to "Entertainment".
+
+RULES FOR SUMMARY FORMATTING (summary MUST be specific and follow these formats):
+- For Flight/Airfare: Must specify the destination, e.g., "Flight tickets to [Destination]" or "Taiwan Business Trip: Flight tickets to Taiwan".
+- For Hotel/Accommodation: Must specify the hotel name, location, and number of nights, e.g., "Taiwan Business Trip: Hotel stay [Hotel Name] [City] - [N] nights". If number of nights is not found in OCR, estimate from date range or state "[Hotel Name] in [City]".
+- For Taxi/Transportation: Must specify the city/country or route, e.g., "Taiwan Business Trip: Taxi in [City/Location]" or "Taiwan Business Trip: from home to airport".
+- For SIM card: Specify the location/carrier, e.g., "Taiwan Business Trip: Simcard in [Location/Airport]".
+- For Meals: Specify who it was with or location, e.g., "Taiwan Business Trip: Having meal with [Client/Team Name/Sale team]" or "Taiwan Business Trip: Having meal at airport" or "VN: Having coffee with [Name]".
+- Always prefix the summary with the trip context if visible from statement details or merchant (e.g., "Taiwan Business Trip: ..."). Keep it concise and clean.
 
 AVAILABLE ACCOUNT CODES:
 ${accountCodesHint}
@@ -465,8 +654,10 @@ ${statementHints}
 INVOICES TO PARSE:
 ${invoiceTexts}
 
+CRITICAL: Return exactly ONE JSON object per invoice above. Do NOT skip any invoice. imageIndex must match the invoice number (=== INVOICE N ===).
+
 Return format:
-[{"imageIndex":1,"date":"YYYY-MM-DD","amount":123.45,"currency":"AUD","merchant":"Name","summary":"Short desc","matchedRowIndex": 5, "accountCode": "Code"}]`;
+[{"imageIndex":1,"date":"YYYY-MM-DD","amount":123.45,"currency":"AUD","merchant":"Name","summary":"Descriptive summary","matchedRowIndex": 5, "accountCode": "Code"}]`;
 }
 
 function parseGeminiBatchResponse(responseText) {
@@ -479,16 +670,18 @@ function parseGeminiBatchResponse(responseText) {
 /**
  *   Get or refresh a Service Account OAuth2 token, with caching.
  */
-function getServiceAccountToken(visionJson, scope) {
-  try {
-    const cached = PropertiesService.getScriptProperties().getProperty(TOKEN_CACHE_KEY);
-    if (cached) {
-      const { token, expiresAt } = JSON.parse(cached);
-      if (token && expiresAt && (expiresAt - Date.now()) > TOKEN_EXPIRY_BUFFER) {
-        return token;
+function getServiceAccountToken(visionJson, scope, forceRefresh) {
+  if (!forceRefresh) {
+    try {
+      const cached = PropertiesService.getScriptProperties().getProperty(TOKEN_CACHE_KEY);
+      if (cached) {
+        const { token, expiresAt } = JSON.parse(cached);
+        if (token && expiresAt && (expiresAt - Date.now()) > TOKEN_EXPIRY_BUFFER) {
+          return token;
+        }
       }
-    }
-  } catch (e) { }
+    } catch (e) { }
+  }
 
   let sa = JSON.parse(visionJson);
   const now = Math.floor(Date.now() / 1000);
@@ -511,7 +704,9 @@ function getServiceAccountToken(visionJson, scope) {
     muteHttpExceptions: true,
   });
 
-  if (resp.getResponseCode() !== 200) throw new Error('Token exchange failed');
+  if (resp.getResponseCode() !== 200) {
+    throw new Error('Token exchange failed: ' + resp.getContentText().substring(0, 150));
+  }
   const tokenData = JSON.parse(resp.getContentText());
   const token = tokenData.access_token;
   const expiresAt = Date.now() + (tokenData.expires_in * 1000);
@@ -562,14 +757,25 @@ function moveImageToDoneFolder(blob, rootFolderId, date) {
 }
 
 /**
+ * Build the [Done-DD-MM] filename prefix for archived receipts.
+ */
+function buildDoneFileName(originalName, date) {
+  const baseName = (originalName || 'image.png').replace(/^\[Done-\d{2}-\d{2}\]\s*/, '');
+  return buildDoneFilePrefix(date) + baseName;
+}
+
+function buildDoneFilePrefix(date) {
+  return `[Done-${Utilities.formatDate(date, Session.getScriptTimeZone(), 'dd-MM')}] `;
+}
+
+/**
  * Rename a matched file to [Done-DD-MM] original_name
  */
 function renameFileWithPrefix(fileObj, date) {
   if (!fileObj || !date) return;
-  const prefix = `[Done-${Utilities.formatDate(date, Session.getScriptTimeZone(), 'dd-MM')}] `;
   const oldName = fileObj.getName();
   if (!oldName.startsWith('[Done-')) {
-    fileObj.setName(prefix + oldName);
+    fileObj.setName(buildDoneFileName(oldName, date));
   }
 }
 
@@ -617,6 +823,13 @@ function handleStatementUpload(fileBase64, fileName) {
     createOrUpdateDaySheet(ss, date, mainSheet);
   });
 
+  // Sort day sheets chronologically
+  try {
+    sortDaySheetsChronologically(ss);
+  } catch (e) {
+    logMsg(LOG.SHEET, 'ERROR', 'Failed to sort day sheets chronologically', e.message);
+  }
+
   return `Imported ${parsedRows.length} rows.`;
 }
 
@@ -634,15 +847,16 @@ function parseStatementRow(rawRow, colMap) {
 function writeStatementRows(mainSheet, parsedRows, config) {
   const startRow = mainSheet.getLastRow() + 1;
   const data2d = parsedRows.map(pr => {
-    const row = new Array(24).fill('');
+    const row = new Array(25).fill('');
     pr.rawRow.slice(0, 16).forEach((v, i) => row[i] = v);
     row[COL.IO_CODE - 1] = config.defaults.io;
     row[COL.COST_CENTER - 1] = config.defaults.costCenter;
     row[COL.TAX_ID - 1] = config.defaults.taxId;
     row[COL.MATCH_STATUS - 1] = STATUS.PENDING;
+    row[COL.IMAGE_COPIED - 1] = 'No';
     return row;
   });
-  mainSheet.getRange(startRow, 1, data2d.length, 24).setValues(data2d);
+  mainSheet.getRange(startRow, 1, data2d.length, 25).setValues(data2d);
   writeVlookupFormulas(mainSheet, startRow, startRow + data2d.length - 1, config.accountCodeRange);
   applyMatchStatusFormatting(mainSheet, startRow, startRow + data2d.length - 1);
 }
@@ -657,25 +871,25 @@ function initMainSheet() {
     sheet = ss.insertSheet(MAIN_SHEET_NAME);
   }
 
-  // Clear only the system/user columns Q-X (columns 17-24)
+  // Clear only the system/user columns Q-Y (columns 17-25)
   const maxRows = Math.max(sheet.getMaxRows(), 100);
-  sheet.getRange(1, 17, maxRows, 8).clearContent().clearFormat().setDataValidation(null);
+  sheet.getRange(1, 17, maxRows, 9).clearContent().clearFormat().setDataValidation(null);
 
   const headers = [
     'Account Code', 'Account Name', 'I/O Code', 'Cost Center',
-    'Summary', 'Tax ID', 'Match Status', 'Invoice Ref'
+    'Summary', 'Tax ID', 'Match Status', 'Invoice Ref', 'Image Copied'
   ];
 
-  // Set headers for columns Q-X
-  const headerRange = sheet.getRange(1, 17, 1, 8);
+  // Set headers for columns Q-Y
+  const headerRange = sheet.getRange(1, 17, 1, 9);
   headerRange.setValues([headers]);
   headerRange
     .setFontWeight('bold')
     .setBackground('#34495e')
     .setFontColor('#ffffff');
 
-  // Column widths for Q-X
-  const widths = [110, 200, 80, 120, 250, 120, 120, 120];
+  // Column widths for Q-Y
+  const widths = [110, 200, 80, 120, 250, 120, 120, 120, 100];
   widths.forEach((w, i) => sheet.setColumnWidth(i + 17, w));
 
   sheet.setFrozenRows(1);
@@ -767,7 +981,7 @@ function initConfigTemplate() {
 /**
  * Create or update a DD-MM day sheet with transaction summary.
  */
-function createOrUpdateDaySheet(wb, date, mainSheet) {
+function createOrUpdateDaySheet(wb, date, mainSheet, sourceSheetName) {
   const sheetName = formatDaySheetName(date);
   logMsg(LOG.SHEET, 'INFO', `Creating/updating day sheet: ${sheetName}`);
 
@@ -777,8 +991,18 @@ function createOrUpdateDaySheet(wb, date, mainSheet) {
     _clearedSheets[sheetName] = true;
   } else {
     if (!_clearedSheets[sheetName]) {
-      if (sheet.getLastRow() > 0 || sheet.getImages().length > 0) {
-        sheet.clear();
+      // Only clear the target day sheet if it is NOT the active sheet containing the active images
+      if (!sourceSheetName || sheetName !== sourceSheetName) {
+        if (sheet.getLastRow() > 0 || sheet.getImages().length > 0) {
+          sheet.clear();
+          // Also remove all images from the sheet to start fresh
+          const existingImages = sheet.getImages();
+          existingImages.forEach(img => {
+            try {
+              img.remove();
+            } catch (e) {}
+          });
+        }
       }
       _clearedSheets[sheetName] = true;
     }
@@ -789,10 +1013,13 @@ function createOrUpdateDaySheet(wb, date, mainSheet) {
 /**
  * Inserts the invoice image blob into the day sheet, and triggers the layout formatting.
  */
-function insertInvoiceImageToDaySheet(sheet, blob) {
+function insertInvoiceImageToDaySheet(sheet, blob, rowNum) {
   try {
     // Temporarily insert at A2 (Column A, Row 2)
-    sheet.insertImage(blob, 1, 2);
+    const img = sheet.insertImage(blob, 1, 2);
+    if (rowNum && img && typeof img.setAltTextTitle === 'function') {
+      img.setAltTextTitle("Row_" + rowNum);
+    }
     // Run the layout manager to resize and position all images side-by-side
     arrangeAndResizeImagesInSheet(sheet);
   } catch (e) {
@@ -818,12 +1045,43 @@ function arrangeAndResizeImagesInSheet(sheet) {
     return;
   }
 
-  let currentXOffset = 0;
-  const startRow = 2; // Row 2
+  // Sort images sequentially based on their matched bank statement row number (stored in Alt Text Title)
+  images.sort((a, b) => {
+    const hasAltTextFnA = a && (typeof a.getAltTextTitle === 'function');
+    const hasAltTextFnB = b && (typeof b.getAltTextTitle === 'function');
+    const titleA = hasAltTextFnA ? (a.getAltTextTitle() || '') : '';
+    const titleB = hasAltTextFnB ? (b.getAltTextTitle() || '') : '';
+    const rowA = parseInt(titleA.replace('Row_', ''), 10) || 999999;
+    const rowB = parseInt(titleB.replace('Row_', ''), 10) || 999999;
+    return rowA - rowB;
+  });
+
+  const startRow = 1; // Row 1 (move straight to top)
   const startCol = 1; // Column A (1)
-  const anchorCell = sheet.getRange(startRow, startCol);
   const maxDim = 500;
   const errors = [];
+
+  // Set all columns in the sheet to the standard width (100px) to ensure consistency in Sheets and Excel
+  if (typeof sheet.setColumnWidth === 'function' && typeof sheet.getMaxColumns === 'function') {
+    const maxCols = sheet.getMaxColumns();
+    for (let c = 1; c <= maxCols; c++) {
+      try {
+        sheet.setColumnWidth(c, 100);
+      } catch (e) {
+        break;
+      }
+    }
+  }
+
+  // Clear Row 1 cells to ensure it is completely empty
+  if (typeof sheet.getRange === 'function' && typeof sheet.getLastColumn === 'function') {
+    const lastCol = Math.max(sheet.getLastColumn(), 20);
+    try {
+      sheet.getRange(1, 1, 1, lastCol).clearContent().clearFormat();
+    } catch (e) {}
+  }
+
+  let currentXOffset = 0;
 
   images.forEach((img, idx) => {
     try {
@@ -854,9 +1112,10 @@ function arrangeAndResizeImagesInSheet(sheet) {
       img.setWidth(targetWidth);
       img.setHeight(targetHeight);
 
-      // 3. Anchor and position side-by-side with 10px horizontal gap
-      img.setAnchorCell(anchorCell);
-      img.setAnchorCellXOffset(currentXOffset);
+      // 3. Anchor and position side-by-side with 10px horizontal gap using standard cell positioning
+      const anchorPos = getAnchorColumnAndOffset(sheet, startRow, startCol, currentXOffset);
+      img.setAnchorCell(anchorPos.cell);
+      img.setAnchorCellXOffset(anchorPos.xOffset);
       img.setAnchorCellYOffset(0);
 
       // Advance offset by width + 10px gap
@@ -872,8 +1131,64 @@ function arrangeAndResizeImagesInSheet(sheet) {
     throw new Error('Failed to arrange some images:\n' + errors.join('\n'));
   }
 
+  // Force flush changes to database immediately so Excel export has the latest layout
+  if (typeof SpreadsheetApp.flush === 'function') {
+    SpreadsheetApp.flush();
+  }
+
   logMsg(LOG.SHEET, 'INFO', `Arranged and resized ${images.length} images in sheet ${sheetName}`);
 }
+
+/**
+ * Calculates the anchor cell and the X offset relative to that cell for a given cumulative X offset.
+ * Accumulates sheet column widths to find the correct column.
+ */
+function getAnchorColumnAndOffset(sheet, targetRow, startCol, cumulativeXOffset) {
+  let col = startCol;
+  let remainingOffset = cumulativeXOffset;
+  
+  // Use column widths if the method exists (standard Google Sheets environment),
+  // otherwise fallback to a default column width of 100px (test/mock environment).
+  const hasColumnWidthFn = sheet && (typeof sheet.getColumnWidth === 'function');
+  const hasMaxColumnsFn = sheet && (typeof sheet.getMaxColumns === 'function');
+  
+  while (true) {
+    let colWidth = 100;
+    if (hasColumnWidthFn) {
+      try {
+        colWidth = sheet.getColumnWidth(col);
+        if (colWidth <= 0) colWidth = 100;
+      } catch (e) {
+        colWidth = 100;
+      }
+    }
+    
+    if (remainingOffset < colWidth) {
+      break;
+    }
+    
+    remainingOffset -= colWidth;
+    col++;
+  }
+  
+  // Dynamically insert columns if we exceed the sheet's current column count (only in Google Sheets)
+  if (hasMaxColumnsFn && (typeof sheet.insertColumnsAfter === 'function')) {
+    const maxCols = sheet.getMaxColumns();
+    if (col > maxCols) {
+      try {
+        sheet.insertColumnsAfter(maxCols, col - maxCols);
+      } catch (e) {
+        logMsg(LOG.SHEET, 'ERROR', `Failed to insert ${col - maxCols} columns`, e.message);
+      }
+    }
+  }
+  
+  return {
+    cell: sheet.getRange(targetRow, col),
+    xOffset: remainingOffset
+  };
+}
+
 
 /**
  * Resizes and arranges images in all day sheets (format DD-MM) in the spreadsheet.
@@ -896,11 +1211,64 @@ function arrangeAllSheetsImages() {
     }
   });
 
+  // Sort day sheets chronologically
+  try {
+    sortDaySheetsChronologically(ss);
+  } catch (e) {
+    errors.push(`Sorting: ${e.message}`);
+  }
+
   if (errors.length > 0) {
     throw new Error('Failed to arrange images in some sheets:\n' + errors.join('\n'));
   }
 
   return processedSheets;
+}
+
+/**
+ * Sorts all day sheets (format DD-MM) chronologically in the spreadsheet tab bar.
+ */
+function sortDaySheetsChronologically(ss) {
+  if (!ss) {
+    ss = SpreadsheetApp.getActiveSpreadsheet();
+  }
+  const sheets = ss.getSheets();
+  const daySheets = [];
+  let minIdx = -1;
+
+  sheets.forEach((sheet, idx) => {
+    const name = sheet.getName();
+    if (isDaySheet(name)) {
+      const date = parseDaySheetName(name);
+      if (date) {
+        daySheets.push({
+          sheet: sheet,
+          name: name,
+          dateValue: date.getTime()
+        });
+        if (minIdx === -1 || idx < minIdx) {
+          minIdx = idx;
+        }
+      }
+    }
+  });
+
+  if (daySheets.length <= 1) return;
+
+  // Sort earliest date first
+  daySheets.sort((a, b) => a.dateValue - b.dateValue);
+
+  const originalActiveSheet = ss.getActiveSheet();
+  const startPos = minIdx + 1; // 1-indexed starting position
+
+  daySheets.forEach((ds, i) => {
+    ds.sheet.activate();
+    ss.moveActiveSheet(startPos + i);
+  });
+
+  try {
+    originalActiveSheet.activate();
+  } catch (e) {}
 }
 
 

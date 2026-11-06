@@ -71,6 +71,7 @@ function runAllTests() {
     testMatchToStatement,
     testParseGeminiBatchResponse, 
     testFormatAndParseDaySheetName,
+    testBuildDoneFileName,
     testImageAutoSpacingAndScaling
   ];
   
@@ -131,15 +132,30 @@ function testFormatAndParseDaySheetName() {
   return { name: 'testFormatAndParseDaySheetName', passed: pass, error: pass ? null : 'Format failed' };
 }
 
+function testBuildDoneFileName() {
+  const date = new Date(2026, 6, 26); // 26-07-2026
+  const name = buildDoneFileName('rec_test.png', date);
+  const pass = name === '[Done-26-07] rec_test.png';
+  return { name: 'testBuildDoneFileName', passed: pass, error: pass ? null : `Expected [Done-26-07] rec_test.png, got ${name}` };
+}
+
 function testImageAutoSpacingAndScaling() {
   const mockImages = [];
   const mockSheet = {
     getName: () => '27-02',
     getImages: () => mockImages,
-    getRange: (row, col) => ({
-      getRow: () => row,
-      getColumn: () => col
-    }),
+    getRange: (row, col) => {
+      const mockRange = {
+        getRow: () => row,
+        getColumn: () => col,
+        setValue: (val) => mockRange,
+        setFontWeight: (fw) => mockRange,
+        setHorizontalAlignment: (align) => mockRange,
+        clearContent: () => mockRange,
+        clearFormat: () => mockRange
+      };
+      return mockRange;
+    },
     insertImage: (blob, col, row) => {
       const mockImg = {
         width: (blob && blob.width) || 400,
@@ -163,31 +179,36 @@ function testImageAutoSpacingAndScaling() {
         getAnchorCell: () => mockImg.anchor || {
           getColumn: () => mockImg.col,
           getRow: () => mockImg.row
-        }
+        },
+        altTitle: '',
+        getAltTextTitle: () => mockImg.altTitle,
+        setAltTextTitle: (t) => { mockImg.altTitle = t; }
       };
       mockImages.push(mockImg);
       return mockImg;
     }
   };
 
-  // Test 1: Insert first image (800x400 px) -> should resize to 500x250 px, offset 0
-  insertInvoiceImageToDaySheet(mockSheet, { width: 800, height: 400 });
+  // Test 1: Insert first image (800x400 px) -> should resize to 500x250 px, anchor column 1, offset 0
+  insertInvoiceImageToDaySheet(mockSheet, { width: 800, height: 400 }, 10);
   const img1 = mockImages[0];
   if (img1.width !== 500 || img1.height !== 250) {
     return { name: 'testImageAutoSpacingAndScaling', passed: false, error: `Img 1 expected 500x250, got ${img1.width}x${img1.height}` };
   }
-  if (img1.xOffset !== 0 || img1.yOffset !== 0) {
-    return { name: 'testImageAutoSpacingAndScaling', passed: false, error: `Img 1 expected offset 0, got ${img1.xOffset}, ${img1.yOffset}` };
+  const col1 = img1.getAnchorCell ? img1.getAnchorCell().getColumn() : 1;
+  if (col1 !== 1 || img1.xOffset !== 0 || img1.yOffset !== 0) {
+    return { name: 'testImageAutoSpacingAndScaling', passed: false, error: `Img 1 expected anchor col 1 and offset 0, got col ${col1}, offset ${img1.xOffset}, ${img1.yOffset}` };
   }
 
-  // Test 2: Insert second image (300x600 px) -> should resize to 250x500 px, offset 510
-  insertInvoiceImageToDaySheet(mockSheet, { width: 300, height: 600 });
+  // Test 2: Insert second image (300x600 px) -> should resize to 250x500 px, anchor column 6, offset 10
+  insertInvoiceImageToDaySheet(mockSheet, { width: 300, height: 600 }, 20);
   const img2 = mockImages[1];
   if (img2.width !== 250 || img2.height !== 500) {
     return { name: 'testImageAutoSpacingAndScaling', passed: false, error: `Img 2 expected 250x500, got ${img2.width}x${img2.height}` };
   }
-  if (img2.xOffset !== 510 || img2.yOffset !== 0) {
-    return { name: 'testImageAutoSpacingAndScaling', passed: false, error: `Img 2 expected X offset 510, got ${img2.xOffset}` };
+  const col2 = img2.getAnchorCell ? img2.getAnchorCell().getColumn() : 6;
+  if (col2 !== 6 || img2.xOffset !== 10 || img2.yOffset !== 0) {
+    return { name: 'testImageAutoSpacingAndScaling', passed: false, error: `Img 2 expected anchor col 6 and offset 10, got col ${col2}, offset ${img2.xOffset}, ${img2.yOffset}` };
   }
 
   return { name: 'testImageAutoSpacingAndScaling', passed: true, error: null };

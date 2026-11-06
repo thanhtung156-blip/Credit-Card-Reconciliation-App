@@ -1,4 +1,4 @@
-﻿// â”€â”€â”€ SHEET NAMES â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// â”€â”€â”€ SHEET NAMES â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 const CONFIG_SHEET_NAME   = 'Config';
 const MAIN_SHEET_NAME     = 'Corporate card details';
 const AUDIT_SHEET_NAME    = 'OCR Audit';
@@ -7,6 +7,9 @@ const AUDIT_SHEET_NAME    = 'OCR Audit';
 const DATA_START_ROW       = 2;
 const MATCH_DATE_TOLERANCE = 4;
 const MIN_MATCH_SCORE      = 0.8;
+const GEMINI_BATCH_SIZE    = 5;
+const OCR_RETRY_COUNT      = 2;
+const OCR_RETRY_DELAY_MS   = 3000;
 const DONE_SUBFOLDER       = 'Unmatched';
 const ERROR_SUBFOLDER      = 'Error';
 
@@ -51,6 +54,7 @@ const COL = {
   TAX_ID:          22,
   MATCH_STATUS:    23,
   INVOICE_REF:     24,
+  IMAGE_COPIED:    25,
 };
 
 // â”€â”€â”€ MATCH STATUS VALUES â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -337,7 +341,7 @@ function validateBeforeExport(mainSheet) {
   const issues = [];
   if (lastRow < DATA_START_ROW) return issues;
 
-  const data = mainSheet.getRange(DATA_START_ROW, 1, lastRow - DATA_START_ROW + 1, 24).getValues();
+  const data = mainSheet.getRange(DATA_START_ROW, 1, lastRow - DATA_START_ROW + 1, 25).getValues();
   data.forEach((row, i) => {
     const rowNum = i + DATA_START_ROW;
     if (!row[COL.ACCOUNT_CODE - 1] || row[COL.ACCOUNT_CODE - 1].toString().trim() === '') {
